@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+
+# 実行時に生成される状態ファイル・キャッシュ（ルートフォルダ側に生成されるため通常は無関係だが念のため）
+.moviemanager_cache.json
+.moviemanager.json
+
+# 検証用フィクスチャ（動画ファイルなのでリポジトリに含めない）
+testdata/
+
+# サイズが大きいランタイム依存物。README の手順で別途配置する。
+libmpv-2.dll
