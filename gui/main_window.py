@@ -11,6 +11,7 @@ from PySide6.QtCore import QByteArray, QItemSelectionModel, QTimer, Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -38,6 +39,7 @@ from gui import dialogs
 from gui.group_tree import GroupTree
 from gui.log_widget import LogView, QtLogHandler
 from gui.player import PlayerWidget
+from gui.thumbnail_strip import ThumbnailStrip
 from gui.video_table import Column, FilterMode, VideoFilterProxyModel, VideoTableModel, VideoTableView
 
 
@@ -113,6 +115,10 @@ class MainWindow(QMainWindow):
         except ValueError:
             self._sort_mode = SortMode.NAME
 
+        self._relay_active = False
+        self._relay_videos: list[VideoInfo] = []
+        self._relay_index = 0
+
         self._group_tree = GroupTree()
         self._table_model = VideoTableModel()
         self._proxy_model = VideoFilterProxyModel()
@@ -136,19 +142,19 @@ class MainWindow(QMainWindow):
 
         self._player = PlayerWidget()
 
-        center_widget = QWidget()
-        center_layout = QVBoxLayout(center_widget)
+        self._center_widget = QWidget()
+        center_layout = QVBoxLayout(self._center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.addLayout(self._build_filter_bar())
         center_layout.addWidget(self._table_view, 1)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._group_tree)
-        splitter.addWidget(center_widget)
-        splitter.addWidget(self._player)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        splitter.setStretchFactor(2, 3)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.addWidget(self._group_tree)
+        self._splitter.addWidget(self._center_widget)
+        self._splitter.addWidget(self._player)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 3)
+        self._splitter.setStretchFactor(2, 3)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setVisible(False)
@@ -157,6 +163,9 @@ class MainWindow(QMainWindow):
         bottom_bar = QHBoxLayout()
         bottom_bar.addWidget(self._progress_bar, 1)
         bottom_bar.addWidget(self._cancel_button)
+
+        self._thumbnail_strip = ThumbnailStrip()
+        self._thumbnail_strip.setVisible(False)
 
         self._log_view = LogView()
         self._log_handler = QtLogHandler(self)
@@ -167,7 +176,8 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         central_layout = QVBoxLayout(central_widget)
         central_layout.setContentsMargins(0, 0, 0, 0)
-        central_layout.addWidget(splitter, 1)
+        central_layout.addWidget(self._splitter, 1)
+        central_layout.addWidget(self._thumbnail_strip)
         central_layout.addLayout(bottom_bar)
         central_layout.addWidget(self._log_view)
         self.setCentralWidget(central_widget)
@@ -189,6 +199,12 @@ class MainWindow(QMainWindow):
         self._move_to_folder_action.setEnabled(False)
         self._settings_action = toolbar.addAction("設定")
 
+        self._relay_action = toolbar.addAction("リレー再生")
+        self._relay_action.setCheckable(True)
+        self._relay_action.setEnabled(False)
+        self._relay_loop_checkbox = QCheckBox("最後まで再生したらループ")
+        toolbar.addWidget(self._relay_loop_checkbox)
+
         toolbar.addWidget(QLabel(" 結合順: "))
         self._sort_combo = QComboBox()
         self._sort_combo.addItem("ファイル名順", SortMode.NAME)
@@ -208,6 +224,9 @@ class MainWindow(QMainWindow):
         self._trash_action.triggered.connect(self._on_delete_requested)
         self._move_to_folder_action.triggered.connect(self._on_move_to_folder_action)
         self._settings_action.triggered.connect(self._on_settings_action)
+        self._relay_action.toggled.connect(self._on_relay_toggled)
+        self._player.playback_finished.connect(self._on_relay_playback_finished)
+        self._thumbnail_strip.thumbnail_clicked.connect(self._on_thumbnail_clicked)
         self._sort_combo.currentIndexChanged.connect(self._on_sort_mode_changed)
         self._cancel_button.clicked.connect(self._on_cancel_clicked)
         self._group_tree.group_selected.connect(self._on_group_selected)
@@ -304,6 +323,7 @@ class MainWindow(QMainWindow):
             "ascii"
         )
         self._settings.save()
+        self._thumbnail_strip.shutdown()
         self._player.shutdown()
         super().closeEvent(event)
 
@@ -348,6 +368,7 @@ class MainWindow(QMainWindow):
         )
         self._trash_action.setEnabled(not busy and self._root is not None)
         self._move_to_folder_action.setEnabled(not busy and self._root is not None)
+        self._relay_action.setEnabled(not busy and self._proxy_model.rowCount() > 0)
         self._progress_bar.setVisible(busy)
         self._cancel_button.setVisible(busy)
         if busy:
@@ -381,6 +402,93 @@ class MainWindow(QMainWindow):
                 self._settings.crf,
             )
 
+    def _on_relay_toggled(self, checked: bool) -> None:
+        if checked:
+            self._start_relay()
+        else:
+            self._stop_relay()
+
+    def _relay_videos_from_table(self) -> list[VideoInfo]:
+        return [
+            self._table_model.video_at(
+                self._proxy_model.mapToSource(self._proxy_model.index(row, 0)).row()
+            )
+            for row in range(self._proxy_model.rowCount())
+        ]
+
+    def _start_relay(self) -> None:
+        videos = self._relay_videos_from_table()
+        if not videos:
+            QMessageBox.information(self, "リレー再生", "再生する動画がありません。")
+            self._relay_action.setChecked(False)
+            return
+
+        logger.info("リレー再生を開始: %d本", len(videos))
+        self._relay_active = True
+        self._player.set_relay_mode(True)
+        self._apply_relay_layout(True)
+        self._begin_relay_sequence(videos)
+
+    def _begin_relay_sequence(self, videos: list[VideoInfo]) -> None:
+        self._relay_videos = videos
+        self._relay_index = 0
+        self._thumbnail_strip.set_videos(videos)
+        self._play_relay_current()
+
+    def _stop_relay(self) -> None:
+        if not self._relay_active:
+            return
+        logger.info("リレー再生を終了")
+        self._relay_active = False
+        self._relay_videos = []
+        self._player.set_relay_mode(False)
+        self._thumbnail_strip.clear()
+        self._apply_relay_layout(False)
+        self._relay_action.setChecked(False)
+
+    def _apply_relay_layout(self, active: bool) -> None:
+        # グループツリー（フォルダ選択）はリレー中も表示したままにし、
+        # 別フォルダへすぐ切り替えられるようにする。隠すのは動画テーブルのみ。
+        self._center_widget.setVisible(not active)
+        self._thumbnail_strip.setVisible(active)
+        if active:
+            total = sum(self._splitter.sizes()) or 1
+            self._splitter.setSizes([total // 6, 0, total * 5 // 6])
+        else:
+            total = sum(self._splitter.sizes()) or 1
+            self._splitter.setSizes([total // 5, total * 2 // 5, total * 2 // 5])
+
+    def _play_relay_current(self) -> None:
+        if not (0 <= self._relay_index < len(self._relay_videos)):
+            return
+        info = self._relay_videos[self._relay_index]
+        try:
+            self._player.load(info.path)
+        except Exception as e:
+            logger.warning("リレー再生に失敗しました: %s: %s", info.path, e)
+        self._thumbnail_strip.set_current_index(self._relay_index)
+        self._status_bar.showMessage(
+            f"リレー再生中 ({self._relay_index + 1}/{len(self._relay_videos)}): {info.path.name}"
+        )
+
+    def _on_thumbnail_clicked(self, index: int) -> None:
+        if not self._relay_active:
+            return
+        self._relay_index = index
+        self._play_relay_current()
+
+    def _on_relay_playback_finished(self) -> None:
+        if not self._relay_active:
+            return
+        self._relay_index += 1
+        if self._relay_index >= len(self._relay_videos):
+            if self._relay_loop_checkbox.isChecked():
+                self._relay_index = 0
+            else:
+                self._stop_relay()
+                return
+        self._play_relay_current()
+
     def _on_scan_finished(self, groups: dict[str, list[VideoInfo]]) -> None:
         self._groups = groups
         self._group_tree.set_groups(groups)
@@ -407,6 +515,17 @@ class MainWindow(QMainWindow):
             first_index = self._proxy_model.index(0, 0)
             self._select_row(first_index)
         self._table_view.setFocus()
+        self._relay_action.setEnabled(not self._is_busy() and self._proxy_model.rowCount() > 0)
+
+        if self._relay_active:
+            # リレー再生中にグループツリーで別フォルダを選んだ場合、
+            # そのフォルダの動画でリレーを続ける（先頭から）。
+            new_videos = self._relay_videos_from_table()
+            if not new_videos:
+                self._status_bar.showMessage(f"「{name}」には再生できる動画がありません。")
+                return
+            logger.info("リレー再生の対象フォルダを切り替え: %s (%d本)", name, len(new_videos))
+            self._begin_relay_sequence(new_videos)
 
     def _on_sort_mode_changed(self) -> None:
         self._sort_mode = self._sort_combo.currentData()
@@ -462,6 +581,7 @@ class MainWindow(QMainWindow):
         mode = self._filter_combo.currentData()
         self._filter_stars_spin.setEnabled(mode == FilterMode.MIN_STARS)
         self._proxy_model.set_filter(mode, self._filter_stars_spin.value())
+        self._relay_action.setEnabled(not self._is_busy() and self._proxy_model.rowCount() > 0)
 
     def _on_select_all(self) -> None:
         self._table_model.set_all_checked(True)

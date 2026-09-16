@@ -38,6 +38,7 @@ class PlayerWidget(QWidget):
 
     time_pos_changed = Signal(float)
     duration_changed = Signal(float)
+    playback_finished = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -100,6 +101,16 @@ class PlayerWidget(QWidget):
         self.time_pos_changed.connect(self._on_time_pos)
         self.duration_changed.connect(self._on_duration)
 
+        # リレー再生用: ファイルが自然に最後まで再生された（reason == EOF）ときだけ通知する。
+        # ユーザーが unload()/stop で止めた場合（reason == STOP）等は対象外。
+        @self._mpv.event_callback("end-file")
+        def _on_end_file(event: object) -> None:
+            data = getattr(event, "data", None)
+            if data is not None and getattr(data, "reason", None) == mpv.MpvEventEndFile.EOF:
+                self.playback_finished.emit()
+
+        self._end_file_callback = _on_end_file  # GC 防止のため参照を保持
+
         self._play_button.clicked.connect(self.toggle_pause)
         self._volume_slider.valueChanged.connect(self._on_volume_changed)
         self._seek_slider.sliderPressed.connect(self._on_seek_pressed)
@@ -147,6 +158,18 @@ class PlayerWidget(QWidget):
 
     def _on_loop_toggled(self, checked: bool) -> None:
         self._mpv.loop_file = "inf" if checked else "no"
+
+    def set_relay_mode(self, active: bool) -> None:
+        """リレー再生中は 1 本ずつの自動ループを止め、次の動画へ進めるようにする。
+
+        ループ再生チェックボックスは操作できないようにし（見た目も無効化）、
+        リレー終了時はチェックボックスの状態に応じたループ設定へ戻す。
+        """
+        self._loop_checkbox.setEnabled(not active)
+        if active:
+            self._mpv.loop_file = "no"
+        else:
+            self._mpv.loop_file = "inf" if self._loop_checkbox.isChecked() else "no"
 
     def _on_seek_pressed(self) -> None:
         self._seek_slider_pressed = True
