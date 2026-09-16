@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from core.appdir import get_app_dir
+
 # libmpv-2.dll はアプリフォルダ直下に配置する前提。`import mpv` の前に PATH へ追加する。
-_APP_DIR = Path(__file__).resolve().parent.parent
+_APP_DIR = get_app_dir()
 _app_dir_str = str(_APP_DIR)
 if _app_dir_str not in os.environ.get("PATH", "").split(os.pathsep):
     os.environ["PATH"] = _app_dir_str + os.pathsep + os.environ.get("PATH", "")

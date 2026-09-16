@@ -36,6 +36,7 @@ MovieManager/
     settings.py   設定の保存・復元（%LOCALAPPDATA%\MovieManager\settings.json）
     envcheck.py   起動時の外部ツール（ffmpeg/ffprobe/libmpv-2.dll）検出
     applog.py     ログ設定（ファイル出力: %LOCALAPPDATA%\MovieManager\app.log）
+    appdir.py     アプリの実体があるディレクトリの解決（ソース実行 / PyInstaller exe 両対応）
     thumbnails.py サムネイル生成・キャッシュ（リレー再生のサムネイル一覧用）
   gui/
     main_window.py
@@ -45,6 +46,8 @@ MovieManager/
     dialogs.py
     log_widget.py       画面下部のログ表示（QtLogHandler で core.applog.logger と接続）
     thumbnail_strip.py  リレー再生中のサムネイル一覧（横スクロール・クリックでスキップ）
+  icon.ico          アプリアイコン（EXE・ウィンドウタイトルバー用）
+  MovieManager.spec PyInstaller ビルド定義
   docs/PLAN.md
   CLAUDE.md
 ```
@@ -290,3 +293,22 @@ ffprobe で以下を取得し、データクラス `VideoInfo` に保持する�
 - 設定（最後に開いたフォルダ、結合順、エンコーダ設定、ウィンドウ配置）は `%LOCALAPPDATA%\MovieManager\settings.json`。
 - 例外はログに残し、ユーザーには簡潔なダイアログで通知する。アプリを落とさない。
 - 作業報告では、実際に実行したコマンドとその出力のみを記載し、実行していない結果を書かない。
+
+## 13. EXE 化（PyInstaller）
+
+- ビルド定義は `MovieManager.spec`（onedir 構成）。ビルドコマンド:
+  `venv\Scripts\pyinstaller.exe MovieManager.spec --noconfirm`
+  出力先は `dist\MovieManager\MovieManager.exe`。
+- `libmpv-2.dll`（プロジェクトルートに配置したもの）を `--add-binary` で同梱する。
+  ffmpeg / ffprobe は 1 章の方針どおり同梱せず、従来どおり PATH 上にある前提とする
+  （`core/envcheck.py` が起動時にチェックする）。
+- PyInstaller 6 系の onedir 構成では、同梱した DLL 等は `MovieManager.exe` と同じ階層ではなく
+  `_internal` フォルダに置かれる。`core/appdir.py` の `get_app_dir()` は `sys.frozen` のとき
+  `sys._MEIPASS`（= `_internal` フォルダ）を返すようにして、`libmpv-2.dll` の探索先
+  （`gui/player.py`）と `envcheck.py` のチェック先を実際の配置と一致させている。
+  ソースから `python main.py` で実行する場合はプロジェクトルートを返す。
+- アイコン（`icon.ico`）は `python-mpv` 等のランタイム依存とは無関係の見た目用アセットで、
+  `.spec` の `icon=` と exe に埋め込まれる。生成は Pillow で描画するスクリプト（使い捨て、
+  リポジトリには含めない）で作成した。
+- `.gitignore` は `build/` `dist/` と `*.spec` を除外するが、`MovieManager.spec` 自体は
+  `!MovieManager.spec` で明示的に追跡対象に戻している（ビルド定義はソース扱い）。

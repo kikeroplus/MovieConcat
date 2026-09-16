@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core import envcheck
+from core.appdir import get_app_dir
 from core.applog import logger, setup_file_logging
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = get_app_dir()
 
 
 def _install_exception_hook() -> None:

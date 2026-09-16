@@ -110,6 +110,8 @@
 - ffmpeg / ffprobe / libmpv 未検出時の案内ダイアログ
 - ログファイル出力、エラーダイアログの整理
 - 必要なら PyInstaller で exe 化（libmpv-2.dll と ffmpeg の同梱方法を確認）
+  → 完了。`MovieManager.spec`（onedir、libmpv-2.dll 同梱、ffmpeg/ffprobe は非同梱で PATH 前提）で
+  ビルドし、実機で起動・スキャンを確認済み。詳細は CLAUDE.md 13 章参照。
 
 **完了条件**: 数百本規模のフォルダで、スキャン → 評価 → フォルダ分け → 結合 → 整理を一通り通せる。
 

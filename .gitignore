@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!MovieManager.spec
 
 # 実行時に生成される状態ファイル・キャッシュ（ルートフォルダ側に生成されるため通常は無関係だが念のため）
 .moviemanager_cache.json
