@@ -13,7 +13,7 @@ if _app_dir_str not in os.environ.get("PATH", "").split(os.pathsep):
     os.environ["PATH"] = _app_dir_str + os.pathsep + os.environ.get("PATH", "")
 
 import mpv  # noqa: E402  (PATH 設定後に import する必要がある)
-from PySide6.QtCore import Qt, Signal  # noqa: E402
+from PySide6.QtCore import QEvent, Qt, Signal  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QCheckBox,
     QHBoxLayout,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 _SEEK_SLIDER_RESOLUTION = 1000
+_WHEEL_SEEK_SECONDS = 5.0
 
 
 def _format_time(seconds: float) -> str:
@@ -38,7 +39,9 @@ class PlayerWidget(QWidget):
 
     time_pos_changed = Signal(float)
     duration_changed = Signal(float)
-    playback_finished = Signal()
+    playlist_index_changed = Signal(int)
+    playlist_finished = Signal()
+    _playlist_pos_raw_changed = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -46,6 +49,8 @@ class PlayerWidget(QWidget):
         self._video_frame = QWidget(self)
         self._video_frame.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self._video_frame.setStyleSheet("background-color: black;")
+        # 動画窓の上でホイールを回すとシークする（上へ回す=巻き戻し、下へ回す=早送り）。
+        self._video_frame.installEventFilter(self)
 
         self._play_button = QPushButton("再生 / 一時停止")
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
@@ -75,6 +80,11 @@ class PlayerWidget(QWidget):
         self._current_path: Optional[Path] = None
         self._seek_slider_pressed = False
 
+        # リレー再生（プレイリスト）用の状態。
+        self._playlist_paths: list[Path] = []
+        self._playlist_running = False  # load_playlist() 中かどうか
+        self._playlist_started = False  # 実際に再生が始まった（pos >= 0 を一度でも観測した）か
+
         self._mpv = mpv.MPV(
             wid=str(int(self._video_frame.winId())),
             input_default_bindings=False,
@@ -101,15 +111,14 @@ class PlayerWidget(QWidget):
         self.time_pos_changed.connect(self._on_time_pos)
         self.duration_changed.connect(self._on_duration)
 
-        # リレー再生用: ファイルが自然に最後まで再生された（reason == EOF）ときだけ通知する。
-        # ユーザーが unload()/stop で止めた場合（reason == STOP）等は対象外。
-        @self._mpv.event_callback("end-file")
-        def _on_end_file(event: object) -> None:
-            data = getattr(event, "data", None)
-            if data is not None and getattr(data, "reason", None) == mpv.MpvEventEndFile.EOF:
-                self.playback_finished.emit()
-
-        self._end_file_callback = _on_end_file  # GC 防止のため参照を保持
+        # リレー再生（プレイリスト）用: mpv 自身のプレイリスト機能で次の動画へ自動的に
+        # 進ませる（Python 側で毎回 load() し直すと、EOF 検知～再読み込みの往復の間に
+        # 一瞬映像が途切れやすいため）。playlist-pos の変化を Signal 経由で橋渡しする。
+        self._mpv.observe_property(
+            "playlist-pos",
+            lambda name, value: self._playlist_pos_raw_changed.emit(value),
+        )
+        self._playlist_pos_raw_changed.connect(self._on_playlist_pos_changed)
 
         self._play_button.clicked.connect(self.toggle_pause)
         self._volume_slider.valueChanged.connect(self._on_volume_changed)
@@ -118,14 +127,19 @@ class PlayerWidget(QWidget):
         self._loop_checkbox.toggled.connect(self._on_loop_toggled)
 
     def load(self, path: Path) -> None:
+        """通常の単発再生（テーブルの行選択など）。プレイリスト状態は解除する。"""
+        self._playlist_running = False
+        self._playlist_paths = []
         self._current_path = path
         self._duration = 0.0
         self._mpv.play(str(path))
         self._mpv.pause = False
 
     def unload(self) -> None:
-        if self._current_path is None:
+        if self._current_path is None and not self._playlist_running:
             return
+        self._playlist_running = False
+        self._playlist_paths = []
         self._current_path = None
         self._duration = 0.0
         self._mpv.command("stop")
@@ -136,6 +150,64 @@ class PlayerWidget(QWidget):
             self._mpv.wait_for_property("core-idle", timeout=2.0)
         except Exception:
             pass
+
+    def load_playlist(self, paths: list[Path], loop: bool) -> None:
+        """リレー再生用: mpv 自身のプレイリストに全曲を積み、内部で自動的に
+        次の動画へ進ませる（Python 側で毎回読み込み直すより切り替えが速く、
+        映像が途切れにくい）。
+
+        単体の「ループ再生」チェックボックスは無効化し、個々の動画が
+        ループして次へ進めなくなるのを防ぐ（プレイリスト全体のループは
+        loop 引数 / set_playlist_loop() で別途制御する）。
+        """
+        self._loop_checkbox.setEnabled(False)
+        self._mpv.loop_file = "no"
+
+        # プレイリストの 1 本目が、直前まで通常再生（テーブル行選択）していたのと
+        # 同じファイルだと、mpv 内部でそのまま再生が継続してしまい playlist-pos の
+        # "0" への変化が観測できない（再生位置も先頭に戻らない）ことがある。
+        # 一旦完全に停止してから組み直すことで、必ず新規に 0 番から始まるようにする。
+        self._mpv.command("stop")
+        try:
+            self._mpv.wait_for_property("core-idle", timeout=1.0)
+        except Exception:
+            pass
+
+        self._playlist_paths = list(paths)
+        self._playlist_running = True
+        self._playlist_started = False
+        self._duration = 0.0
+        self._current_path = paths[0] if paths else None
+
+        self._mpv.loop_playlist = "inf" if loop else "no"
+        self._mpv.playlist_clear()
+        if not paths:
+            return
+        self._mpv.loadfile(str(paths[0]), "replace")
+        for path in paths[1:]:
+            self._mpv.loadfile(str(path), "append")
+        self._mpv.pause = False
+
+    def set_playlist_loop(self, loop: bool) -> None:
+        if self._playlist_running:
+            self._mpv.loop_playlist = "inf" if loop else "no"
+
+    def jump_to_playlist_index(self, index: int) -> None:
+        if not self._playlist_running or not (0 <= index < len(self._playlist_paths)):
+            return
+        self._mpv.playlist_play_index(index)
+
+    def stop_playlist(self) -> None:
+        """リレー再生の終了。単発再生用のループ設定に戻す。"""
+        self._playlist_running = False
+        self._playlist_paths = []
+        self.unload()
+        try:
+            self._mpv.playlist_clear()
+        except Exception:
+            pass
+        self._loop_checkbox.setEnabled(True)
+        self._mpv.loop_file = "inf" if self._loop_checkbox.isChecked() else "no"
 
     def current_path(self) -> Optional[Path]:
         return self._current_path
@@ -153,23 +225,37 @@ class PlayerWidget(QWidget):
     def shutdown(self) -> None:
         self._mpv.terminate()
 
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt overrideの命名規則)
+        if obj is self._video_frame and event.type() == QEvent.Type.Wheel:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.seek_relative(-_WHEEL_SEEK_SECONDS)
+            elif delta < 0:
+                self.seek_relative(_WHEEL_SEEK_SECONDS)
+            return True
+        return super().eventFilter(obj, event)
+
     def _on_volume_changed(self, value: int) -> None:
         self._mpv.volume = value
 
     def _on_loop_toggled(self, checked: bool) -> None:
-        self._mpv.loop_file = "inf" if checked else "no"
+        if not self._playlist_running:
+            self._mpv.loop_file = "inf" if checked else "no"
 
-    def set_relay_mode(self, active: bool) -> None:
-        """リレー再生中は 1 本ずつの自動ループを止め、次の動画へ進めるようにする。
-
-        ループ再生チェックボックスは操作できないようにし（見た目も無効化）、
-        リレー終了時はチェックボックスの状態に応じたループ設定へ戻す。
-        """
-        self._loop_checkbox.setEnabled(not active)
-        if active:
-            self._mpv.loop_file = "no"
-        else:
-            self._mpv.loop_file = "inf" if self._loop_checkbox.isChecked() else "no"
+    def _on_playlist_pos_changed(self, value: object) -> None:
+        index = value if isinstance(value, int) else -1
+        if index >= 0:
+            self._playlist_started = True
+            if 0 <= index < len(self._playlist_paths):
+                self._current_path = self._playlist_paths[index]
+            self.playlist_index_changed.emit(index)
+        elif self._playlist_running and self._playlist_started:
+            # 末尾まで到達しループもしないため mpv がアイドルに戻った
+            # （ユーザーの手動停止は unload()/stop_playlist() 側で先に
+            # _playlist_running を False にしているのでここには来ない）。
+            self._playlist_started = False
+            self._current_path = None
+            self.playlist_finished.emit()
 
     def _on_seek_pressed(self) -> None:
         self._seek_slider_pressed = True

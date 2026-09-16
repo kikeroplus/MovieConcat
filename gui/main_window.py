@@ -7,10 +7,11 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QByteArray, QItemSelectionModel, QTimer, Qt
+from PySide6.QtCore import QByteArray, QEvent, QItemSelectionModel, QTimer, Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -225,8 +226,11 @@ class MainWindow(QMainWindow):
         self._move_to_folder_action.triggered.connect(self._on_move_to_folder_action)
         self._settings_action.triggered.connect(self._on_settings_action)
         self._relay_action.toggled.connect(self._on_relay_toggled)
-        self._player.playback_finished.connect(self._on_relay_playback_finished)
+        self._relay_loop_checkbox.toggled.connect(self._on_relay_loop_toggled)
+        self._player.playlist_index_changed.connect(self._on_playlist_index_changed)
+        self._player.playlist_finished.connect(self._on_playlist_finished)
         self._thumbnail_strip.thumbnail_clicked.connect(self._on_thumbnail_clicked)
+        self._thumbnail_strip.wheel_navigate.connect(self._on_thumbnail_wheel_navigate)
         self._sort_combo.currentIndexChanged.connect(self._on_sort_mode_changed)
         self._cancel_button.clicked.connect(self._on_cancel_clicked)
         self._group_tree.group_selected.connect(self._on_group_selected)
@@ -245,6 +249,23 @@ class MainWindow(QMainWindow):
         # 実行されるよう遅延させる（QTimer.singleShot(0, ...)）。
         QTimer.singleShot(0, self._restore_window_geometry)
         self._restore_last_root()
+
+        # リレー再生中は Space キーで再生/一時停止できるようにする。フォーカスが
+        # どのウィジェット（サムネイルのボタン等）にあっても確実に割り込めるよう、
+        # アプリ全体にイベントフィルタを仕込む（通常時はテーブル側の Space 処理のみ）。
+        app_instance = QApplication.instance()
+        if app_instance is not None:
+            app_instance.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt overrideの命名規則)
+        if (
+            self._relay_active
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Space
+        ):
+            self._player.toggle_pause()
+            return True
+        return super().eventFilter(obj, event)
 
     def _restore_window_geometry(self) -> None:
         if self._settings.window_geometry:
@@ -323,6 +344,9 @@ class MainWindow(QMainWindow):
             "ascii"
         )
         self._settings.save()
+        app_instance = QApplication.instance()
+        if app_instance is not None:
+            app_instance.removeEventFilter(self)
         self._thumbnail_strip.shutdown()
         self._player.shutdown()
         super().closeEvent(event)
@@ -425,15 +449,18 @@ class MainWindow(QMainWindow):
 
         logger.info("リレー再生を開始: %d本", len(videos))
         self._relay_active = True
-        self._player.set_relay_mode(True)
         self._apply_relay_layout(True)
         self._begin_relay_sequence(videos)
 
     def _begin_relay_sequence(self, videos: list[VideoInfo]) -> None:
+        # 動画の切り替え自体は mpv 自身のプレイリスト機能に任せる（Python 側で
+        # 毎回 load() し直すより切り替えが速く、映像が途切れにくいため）。
         self._relay_videos = videos
         self._relay_index = 0
         self._thumbnail_strip.set_videos(videos)
-        self._play_relay_current()
+        self._player.load_playlist(
+            [v.path for v in videos], loop=self._relay_loop_checkbox.isChecked()
+        )
 
     def _stop_relay(self) -> None:
         if not self._relay_active:
@@ -441,7 +468,7 @@ class MainWindow(QMainWindow):
         logger.info("リレー再生を終了")
         self._relay_active = False
         self._relay_videos = []
-        self._player.set_relay_mode(False)
+        self._player.stop_playlist()
         self._thumbnail_strip.clear()
         self._apply_relay_layout(False)
         self._relay_action.setChecked(False)
@@ -458,36 +485,36 @@ class MainWindow(QMainWindow):
             total = sum(self._splitter.sizes()) or 1
             self._splitter.setSizes([total // 5, total * 2 // 5, total * 2 // 5])
 
-    def _play_relay_current(self) -> None:
-        if not (0 <= self._relay_index < len(self._relay_videos)):
+    def _on_playlist_index_changed(self, index: int) -> None:
+        if not self._relay_active or not (0 <= index < len(self._relay_videos)):
             return
-        info = self._relay_videos[self._relay_index]
-        try:
-            self._player.load(info.path)
-        except Exception as e:
-            logger.warning("リレー再生に失敗しました: %s: %s", info.path, e)
-        self._thumbnail_strip.set_current_index(self._relay_index)
+        self._relay_index = index
+        info = self._relay_videos[index]
+        self._thumbnail_strip.set_current_index(index)
         self._status_bar.showMessage(
-            f"リレー再生中 ({self._relay_index + 1}/{len(self._relay_videos)}): {info.path.name}"
+            f"リレー再生中 ({index + 1}/{len(self._relay_videos)}): {info.path.name}"
         )
+
+    def _on_playlist_finished(self) -> None:
+        # ループ OFF で末尾まで再生し終えた（mpv 内部で自動的にここまで到達した）。
+        if self._relay_active:
+            self._stop_relay()
+
+    def _on_relay_loop_toggled(self, checked: bool) -> None:
+        self._player.set_playlist_loop(checked)
 
     def _on_thumbnail_clicked(self, index: int) -> None:
         if not self._relay_active:
             return
-        self._relay_index = index
-        self._play_relay_current()
+        self._player.jump_to_playlist_index(index)
 
-    def _on_relay_playback_finished(self) -> None:
+    def _on_thumbnail_wheel_navigate(self, direction: int) -> None:
         if not self._relay_active:
             return
-        self._relay_index += 1
-        if self._relay_index >= len(self._relay_videos):
-            if self._relay_loop_checkbox.isChecked():
-                self._relay_index = 0
-            else:
-                self._stop_relay()
-                return
-        self._play_relay_current()
+        new_index = self._relay_index + direction
+        if not (0 <= new_index < len(self._relay_videos)):
+            return
+        self._player.jump_to_playlist_index(new_index)
 
     def _on_scan_finished(self, groups: dict[str, list[VideoInfo]]) -> None:
         self._groups = groups

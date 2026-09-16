@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -48,6 +48,7 @@ class ThumbnailWorker(QThread):
 
 class ThumbnailStrip(QScrollArea):
     thumbnail_clicked = Signal(int)
+    wheel_navigate = Signal(int)  # -1: 前へ（上へ回す） / +1: 次へ（下へ回す）
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -69,6 +70,11 @@ class ThumbnailStrip(QScrollArea):
         self._button_group.idClicked.connect(self.thumbnail_clicked)
 
         self._worker: Optional[ThumbnailWorker] = None
+
+        # QScrollArea は実際のホイールイベントを viewport（の子ウィジェット経由で
+        # 伝播した上で viewport 自身）が受け取る。QScrollArea.wheelEvent を
+        # オーバーライドしても呼ばれないため、viewport にイベントフィルタを仕込む。
+        self.viewport().installEventFilter(self)
 
     def set_videos(self, videos: list[VideoInfo]) -> None:
         self._stop_worker()
@@ -118,6 +124,19 @@ class ThumbnailStrip(QScrollArea):
 
     def shutdown(self) -> None:
         self._stop_worker()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt overrideの命名規則)
+        if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
+            # 既定のスクロール動作の代わりに、動画の前後選択として扱う
+            # （上へ回す=前へ、下へ回す=次へ）。
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.wheel_navigate.emit(-1)
+                return True
+            if delta < 0:
+                self.wheel_navigate.emit(1)
+                return True
+        return super().eventFilter(obj, event)
 
     def _stop_worker(self) -> None:
         if self._worker is not None:
