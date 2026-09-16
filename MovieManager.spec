@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller ビルド定義。
+# PyInstaller ビルド定義（onefile: 依存関係のない単独 exe を生成する）。
 #
-# libmpv-2.dll は --add-binary で dist/MovieManager/ 直下（exe と同じ場所）に
-# 配置する。core/appdir.py が sys.frozen 時に exe の場所を app_dir として
+# libmpv-2.dll は同梱し、実行時に %TEMP% 以下の展開フォルダ（sys._MEIPASS）に
+# 展開される。core/appdir.py が sys.frozen 時に sys._MEIPASS を app_dir として
 # 使うため、実行時の探索先と一致する。
 #
 # ffmpeg / ffprobe は同梱しない（CLAUDE.md の仕様どおり PATH 上にある前提。
@@ -37,8 +37,10 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="MovieManager",
     debug=False,
     bootloader_ignore_signals=False,
@@ -46,13 +48,4 @@ exe = EXE(
     upx=False,
     console=False,
     icon=str(project_root / "icon.ico"),
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    name="MovieManager",
 )

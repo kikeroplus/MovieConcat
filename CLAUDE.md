@@ -296,17 +296,20 @@ ffprobe で以下を取得し、データクラス `VideoInfo` に保持する�
 
 ## 13. EXE 化（PyInstaller）
 
-- ビルド定義は `MovieManager.spec`（onedir 構成）。ビルドコマンド:
+- ビルド定義は `MovieManager.spec`（**onefile** 構成。依存関係のない単独 exe 1 個を配布できるように
+  ユーザーの要望で onedir から切り替えた）。ビルドコマンド:
   `venv\Scripts\pyinstaller.exe MovieManager.spec --noconfirm`
-  出力先は `dist\MovieManager\MovieManager.exe`。
-- `libmpv-2.dll`（プロジェクトルートに配置したもの）を `--add-binary` で同梱する。
+  出力先は `dist\MovieManager.exe`（1 ファイルのみ、約 90MB）。
+- `libmpv-2.dll`（プロジェクトルートに配置したもの）を同梱する。
   ffmpeg / ffprobe は 1 章の方針どおり同梱せず、従来どおり PATH 上にある前提とする
   （`core/envcheck.py` が起動時にチェックする）。
-- PyInstaller 6 系の onedir 構成では、同梱した DLL 等は `MovieManager.exe` と同じ階層ではなく
-  `_internal` フォルダに置かれる。`core/appdir.py` の `get_app_dir()` は `sys.frozen` のとき
-  `sys._MEIPASS`（= `_internal` フォルダ）を返すようにして、`libmpv-2.dll` の探索先
-  （`gui/player.py`）と `envcheck.py` のチェック先を実際の配置と一致させている。
-  ソースから `python main.py` で実行する場合はプロジェクトルートを返す。
+- onefile 実行時、同梱した DLL 等は起動のたびに `%TEMP%` 以下の一時フォルダへ展開される
+  （`sys._MEIPASS` が指す場所。exe 本体と同じフォルダではない）。`core/appdir.py` の
+  `get_app_dir()` は `sys.frozen` のとき `sys._MEIPASS` を返すようにしているため、
+  `libmpv-2.dll` の探索先（`gui/player.py`）と `envcheck.py` のチェック先はこの展開先と
+  一致する。ソースから `python main.py` で実行する場合はプロジェクトルートを返す。
+- onefile は起動のたびに展開処理が入るため onedir よりわずかに起動が遅いが、配布物が
+  exe 1 個で済むことを優先した（ユーザー指定）。
 - アイコン（`icon.ico`）は `python-mpv` 等のランタイム依存とは無関係の見た目用アセットで、
   `.spec` の `icon=` と exe に埋め込まれる。生成は Pillow で描画するスクリプト（使い捨て、
   リポジトリには含めない）で作成した。
