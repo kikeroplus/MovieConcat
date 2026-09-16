@@ -226,13 +226,21 @@ class PlayerWidget(QWidget):
         self._mpv.terminate()
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt overrideの命名規則)
-        if obj is self._video_frame and event.type() == QEvent.Type.Wheel:
-            delta = event.angleDelta().y()
-            if delta > 0:
-                self.seek_relative(-_WHEEL_SEEK_SECONDS)
-            elif delta < 0:
-                self.seek_relative(_WHEEL_SEEK_SECONDS)
-            return True
+        if obj is self._video_frame:
+            if event.type() == QEvent.Type.Wheel:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self.seek_relative(-_WHEEL_SEEK_SECONDS)
+                elif delta < 0:
+                    self.seek_relative(_WHEEL_SEEK_SECONDS)
+                return True
+            if (
+                event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                # 動画窓を左クリックすると再生/一時停止（通常再生・リレー再生共通）。
+                self.toggle_pause()
+                return True
         return super().eventFilter(obj, event)
 
     def _on_volume_changed(self, value: int) -> None:

@@ -206,6 +206,20 @@ class MainWindow(QMainWindow):
         self._relay_loop_checkbox = QCheckBox("最後まで再生したらループ")
         toolbar.addWidget(self._relay_loop_checkbox)
 
+        # 主要な操作（フォルダ選択・フォルダ分け・結合実行・リレー再生）を
+        # 青い枠で囲んで目立たせる。
+        for highlighted_action in (
+            self._open_action,
+            self._group_action,
+            self._concat_action,
+            self._relay_action,
+        ):
+            button = toolbar.widgetForAction(highlighted_action)
+            if button is not None:
+                button.setStyleSheet(
+                    "border: 2px solid #1976d2; border-radius: 3px; padding: 2px;"
+                )
+
         toolbar.addWidget(QLabel(" 結合順: "))
         self._sort_combo = QComboBox()
         self._sort_combo.addItem("ファイル名順", SortMode.NAME)
