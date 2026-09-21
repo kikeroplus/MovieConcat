@@ -116,6 +116,11 @@ class MainWindow(QMainWindow):
         except ValueError:
             self._sort_mode = SortMode.NAME
 
+        try:
+            self._relay_sort_mode = SortMode(self._settings.relay_sort_mode)
+        except ValueError:
+            self._relay_sort_mode = SortMode.NAME
+
         self._relay_active = False
         self._relay_videos: list[VideoInfo] = []
         self._relay_index = 0
@@ -222,11 +227,13 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(QLabel(" 結合順: "))
         self._sort_combo = QComboBox()
-        self._sort_combo.addItem("ファイル名順", SortMode.NAME)
-        self._sort_combo.addItem("作成日時順", SortMode.CREATED_AT)
-        self._sort_combo.addItem("手動", SortMode.MANUAL)
-        self._sort_combo.setCurrentIndex(max(self._sort_combo.findData(self._sort_mode), 0))
+        self._fill_sort_combo(self._sort_combo, self._sort_mode)
         toolbar.addWidget(self._sort_combo)
+
+        toolbar.addWidget(QLabel(" リレー再生順: "))
+        self._relay_sort_combo = QComboBox()
+        self._fill_sort_combo(self._relay_sort_combo, self._relay_sort_mode)
+        toolbar.addWidget(self._relay_sort_combo)
 
         self._status_bar = self.statusBar()
         self._status_bar.showMessage("フォルダを選択してください")
@@ -244,8 +251,8 @@ class MainWindow(QMainWindow):
         self._player.playlist_index_changed.connect(self._on_playlist_index_changed)
         self._player.playlist_finished.connect(self._on_playlist_finished)
         self._thumbnail_strip.thumbnail_clicked.connect(self._on_thumbnail_clicked)
-        self._thumbnail_strip.wheel_navigate.connect(self._on_thumbnail_wheel_navigate)
         self._sort_combo.currentIndexChanged.connect(self._on_sort_mode_changed)
+        self._relay_sort_combo.currentIndexChanged.connect(self._on_relay_sort_mode_changed)
         self._cancel_button.clicked.connect(self._on_cancel_clicked)
         self._group_tree.group_selected.connect(self._on_group_selected)
         self._table_view.selectionModel().currentRowChanged.connect(
@@ -271,14 +278,27 @@ class MainWindow(QMainWindow):
         if app_instance is not None:
             app_instance.installEventFilter(self)
 
+    @staticmethod
+    def _fill_sort_combo(combo: QComboBox, current: SortMode) -> None:
+        combo.addItem("ファイル名昇順", SortMode.NAME)
+        combo.addItem("ファイル名降順", SortMode.NAME_DESC)
+        combo.addItem("作成日時昇順", SortMode.CREATED_AT)
+        combo.addItem("作成日時降順", SortMode.CREATED_AT_DESC)
+        combo.addItem("手動", SortMode.MANUAL)
+        combo.setCurrentIndex(max(combo.findData(current), 0))
+
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt overrideの命名規則)
-        if (
-            self._relay_active
-            and event.type() == QEvent.Type.KeyPress
-            and event.key() == Qt.Key.Key_Space
-        ):
-            self._player.toggle_pause()
-            return True
+        if self._relay_active and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_Space:
+                self._player.toggle_pause()
+                return True
+            # コンボボックス操作中は矢印キーを本来の動作（項目選択）に任せる
+            if key in (Qt.Key.Key_Left, Qt.Key.Key_Right) and not isinstance(
+                QApplication.focusWidget(), QComboBox
+            ):
+                self._relay_step(-1 if key == Qt.Key.Key_Left else 1)
+                return True
         return super().eventFilter(obj, event)
 
     def _restore_window_geometry(self) -> None:
@@ -447,12 +467,27 @@ class MainWindow(QMainWindow):
             self._stop_relay()
 
     def _relay_videos_from_table(self) -> list[VideoInfo]:
-        return [
+        # 表示中（フィルタ適用後）の動画を、リレー再生順の設定で並べ替える。
+        videos = [
             self._table_model.video_at(
                 self._proxy_model.mapToSource(self._proxy_model.index(row, 0)).row()
             )
             for row in range(self._proxy_model.rowCount())
         ]
+        manual = None
+        group_name = self._group_tree.current_group_name()
+        if self._state is not None and group_name is not None:
+            manual = self._state.manual_order.get(group_name)
+        return concat.order_videos(videos, self._relay_sort_mode, manual)
+
+    def _on_relay_sort_mode_changed(self) -> None:
+        self._relay_sort_mode = self._relay_sort_combo.currentData()
+        self._settings.relay_sort_mode = self._relay_sort_mode.value
+        self._settings.save()
+        if self._relay_active:
+            videos = self._relay_videos_from_table()
+            if videos:
+                self._begin_relay_sequence(videos)
 
     def _start_relay(self) -> None:
         videos = self._relay_videos_from_table()
@@ -522,7 +557,7 @@ class MainWindow(QMainWindow):
             return
         self._player.jump_to_playlist_index(index)
 
-    def _on_thumbnail_wheel_navigate(self, direction: int) -> None:
+    def _relay_step(self, direction: int) -> None:
         if not self._relay_active:
             return
         new_index = self._relay_index + direction

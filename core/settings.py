@@ -32,6 +32,7 @@ class Settings:
     def __init__(self) -> None:
         self.last_root: Optional[str] = None
         self.sort_mode: str = DEFAULT_SORT_MODE
+        self.relay_sort_mode: str = DEFAULT_SORT_MODE
         self.encoder: str = DEFAULT_ENCODER
         self.crf: int = DEFAULT_CRF
         self.window_geometry: Optional[str] = None
@@ -48,6 +49,7 @@ class Settings:
             return
         self.last_root = data.get("last_root")
         self.sort_mode = data.get("sort_mode", DEFAULT_SORT_MODE)
+        self.relay_sort_mode = data.get("relay_sort_mode", DEFAULT_SORT_MODE)
         self.encoder = data.get("encoder", DEFAULT_ENCODER)
         self.crf = data.get("crf", DEFAULT_CRF)
         self.window_geometry = data.get("window_geometry")
@@ -57,6 +59,7 @@ class Settings:
         data = {
             "last_root": self.last_root,
             "sort_mode": self.sort_mode,
+            "relay_sort_mode": self.relay_sort_mode,
             "encoder": self.encoder,
             "crf": self.crf,
             "window_geometry": self.window_geometry,

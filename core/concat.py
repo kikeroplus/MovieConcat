@@ -39,8 +39,10 @@ class ConcatError(Exception):
 
 
 class SortMode(Enum):
-    NAME = "name"
-    CREATED_AT = "created_at"
+    NAME = "name"  # ファイル名昇順（設定ファイル互換のため値は "name" のまま）
+    NAME_DESC = "name_desc"
+    CREATED_AT = "created_at"  # 作成日時昇順（同上）
+    CREATED_AT_DESC = "created_at_desc"
     MANUAL = "manual"
 
 
@@ -91,8 +93,12 @@ def order_videos(
 ) -> list[VideoInfo]:
     if mode == SortMode.NAME:
         return sorted(videos, key=lambda v: _natural_sort_key(v.path.name))
+    if mode == SortMode.NAME_DESC:
+        return sorted(videos, key=lambda v: _natural_sort_key(v.path.name), reverse=True)
     if mode == SortMode.CREATED_AT:
         return sorted(videos, key=lambda v: v.creation_time)
+    if mode == SortMode.CREATED_AT_DESC:
+        return sorted(videos, key=lambda v: v.creation_time, reverse=True)
     if mode == SortMode.MANUAL:
         registered = manual_order or []
         index = {name: i for i, name in enumerate(registered)}

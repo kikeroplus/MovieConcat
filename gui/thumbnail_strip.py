@@ -48,7 +48,6 @@ class ThumbnailWorker(QThread):
 
 class ThumbnailStrip(QScrollArea):
     thumbnail_clicked = Signal(int)
-    wheel_navigate = Signal(int)  # -1: 前へ（上へ回す） / +1: 次へ（下へ回す）
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -127,14 +126,11 @@ class ThumbnailStrip(QScrollArea):
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt overrideの命名規則)
         if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
-            # 既定のスクロール動作の代わりに、動画の前後選択として扱う
-            # （上へ回す=前へ、下へ回す=次へ）。
-            delta = event.angleDelta().y()
-            if delta > 0:
-                self.wheel_navigate.emit(-1)
-                return True
-            if delta < 0:
-                self.wheel_navigate.emit(1)
+            # 縦ホイールを横スクロールとして扱う（下へ回す=右へ、上へ回す=左へ）。
+            delta = event.angleDelta().y() or event.angleDelta().x()
+            if delta != 0:
+                bar = self.horizontalScrollBar()
+                bar.setValue(bar.value() - delta)
                 return True
         return super().eventFilter(obj, event)
 
