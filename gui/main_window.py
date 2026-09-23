@@ -794,8 +794,13 @@ class MainWindow(QMainWindow):
         リストを作り直し、必要なら `jump_to_playlist_index` で新しい「次の動画」の
         位置まで進める。
 
-        バックグラウンドで再スキャンをかけてテーブル・グループツリーの情報を追随させる
-        が、その再スキャンに伴うグループツリーの再選択でリレーが先頭から作り直されない
+        ごみ箱送り自体は他の削除操作と同じくワーカースレッドで行う（`_run_trash`／
+        `_start_maintenance_thread`）。send2trash はシェル操作でメインスレッドの
+        メッセージポンプを巻き込むことがあり、メインスレッドで直接呼ぶとリレー再生中の
+        mpv（ネイティブウィンドウ埋め込み）の入力・描画が一時的に反応しなくなる不具合が
+        あったため、GUI スレッドをブロックしない経路に統一した。
+        完了後は `_on_maintenance_thread_finished` が自動的に再スキャンをかけるが、
+        その再スキャンに伴うグループツリーの再選択でリレーが先頭から作り直されない
         よう抑制する（_suppress_relay_resync、_on_group_selected 参照）。
         """
         if self._root is None or self._state is None or self._is_busy():
@@ -826,21 +831,10 @@ class MainWindow(QMainWindow):
 
         # load_playlist()/stop_playlist() のいずれの経路でも、ここに来た時点で
         # 削除対象のファイルは mpv から解放済み（ハンドルが外れている）。
-        applied, warnings = fileops.trash_files([target.path])
-        for path in applied:
-            self._state.set_excluded(path, False)
-        self._state.save()
-
-        if warnings:
-            logger.warning("削除に失敗しました: %s", "; ".join(warnings))
-            QMessageBox.warning(self, "削除に失敗しました", "\n".join(warnings))
-        else:
-            logger.info("リレー再生中に削除しました: %s", target.path.name)
-            self._status_bar.showMessage(f"削除しました: {target.path.name}")
-
+        logger.info("リレー再生中に削除します: %s", target.path.name)
         if self._relay_active:
             self._suppress_relay_resync = True
-        self._start_scan()
+        self._start_maintenance_thread(_run_trash, "ごみ箱へ移動中...", [target], self._state)
 
     def _on_move_to_folder_action(self) -> None:
         if self._root is None or self._state is None or self._is_busy():
