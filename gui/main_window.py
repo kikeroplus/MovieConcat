@@ -788,11 +788,17 @@ class MainWindow(QMainWindow):
         mpv の `playlist-remove` で現在項目だけを取り除く方式は、内部的に一旦停止 →
         次項目再生という遷移になり playlist-pos が一時的に不定値を経由することがあり、
         通常の EOF 検知（`_on_playlist_pos_changed` の -1 判定）を誤って発火させて
-        リレーがそのまま終了してしまう不具合があったため採用していない。代わりに
-        既存の `_begin_relay_sequence`（load_playlist の「stop → wait for core-idle →
-        再構築」という、ファイルハンドルの解放待ちも含めて実績のある処理）で
-        リストを作り直し、必要なら `jump_to_playlist_index` で新しい「次の動画」の
-        位置まで進める。
+        リレーがそのまま終了してしまう不具合があったため採用していない。
+
+        「次の動画」から始まるリストを作って `_begin_relay_sequence`（= load_playlist
+        による再構築）に渡す方式にしている。`load_playlist()` 直後に
+        `jump_to_playlist_index()` で目的の位置まで送る方式も試したが、再構築直後は
+        mpv 側のプレイリストがまだ完全に組み上がっていないタイミングがあるらしく、
+        意図しない位置（末尾など）から再生が始まり、かつその後キー操作を受け付けなく
+        なる不具合があったため採用していない。ループ ON の場合は「次の動画」以降 →
+        先頭からの順で並べ替えたリスト（無限ループなので位相をずらすだけで再生順は
+        変わらない）、OFF の場合は「次の動画」以降だけのリスト（すでに見た分は
+        再度読み込まない）を渡す。
 
         ごみ箱送り自体は他の削除操作と同じくワーカースレッドで行う（`_run_trash`／
         `_start_maintenance_thread`）。send2trash はシェル操作でメインスレッドの
@@ -823,11 +829,15 @@ class MainWindow(QMainWindow):
             self._stop_relay()
         else:
             # 削除した項目を詰めるので、同じインデックスがそのまま「次の動画」になる
-            # （末尾を削除しループ ON の場合のみ先頭へ戻る）。
+            # （末尾を削除しループ ON の場合のみ先頭へ戻る）。「次の動画」が先頭に来る
+            # リストを作って渡す（load_playlist 直後の jump は不具合があったため
+            # 使わない。このメソッドの docstring 参照）。
             next_index = 0 if was_last else removed_index
-            self._begin_relay_sequence(remaining)
-            if next_index != 0:
-                self._player.jump_to_playlist_index(next_index)
+            if loop:
+                playlist_to_load = remaining[next_index:] + remaining[:next_index]
+            else:
+                playlist_to_load = remaining[next_index:]
+            self._begin_relay_sequence(playlist_to_load)
 
         # load_playlist()/stop_playlist() のいずれの経路でも、ここに来た時点で
         # 削除対象のファイルは mpv から解放済み（ハンドルが外れている）。
