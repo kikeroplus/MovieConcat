@@ -124,6 +124,9 @@ class MainWindow(QMainWindow):
         self._relay_active = False
         self._relay_videos: list[VideoInfo] = []
         self._relay_index = 0
+        # リレー再生中に削除して再スキャンをかけた際、グループツリーの再選択で
+        # リレーが先頭から作り直されてしまわないようにするための抑制フラグ。
+        self._suppress_relay_resync = False
 
         self._group_tree = GroupTree()
         self._table_model = VideoTableModel()
@@ -199,8 +202,6 @@ class MainWindow(QMainWindow):
         self._undo_action = toolbar.addAction("元に戻す")
         self._undo_action.setEnabled(False)
         self._undo_action.setShortcut(QKeySequence.StandardKey.Undo)
-        self._trash_action = toolbar.addAction("ごみ箱へ")
-        self._trash_action.setEnabled(False)
         self._move_to_folder_action = toolbar.addAction("別フォルダへまとめる")
         self._move_to_folder_action.setEnabled(False)
         self._settings_action = toolbar.addAction("設定")
@@ -234,6 +235,16 @@ class MainWindow(QMainWindow):
         self._relay_sort_combo = QComboBox()
         self._fill_sort_combo(self._relay_sort_combo, self._relay_sort_mode)
         toolbar.addWidget(self._relay_sort_combo)
+
+        # ごみ箱へは誤操作を避けたい破壊的操作のため、一番右に離して配置し、
+        # 黄色い枠で囲んで注意を引く。
+        self._trash_action = toolbar.addAction("ごみ箱へ")
+        self._trash_action.setEnabled(False)
+        trash_button = toolbar.widgetForAction(self._trash_action)
+        if trash_button is not None:
+            trash_button.setStyleSheet(
+                "border: 2px solid #f9a825; border-radius: 3px; padding: 2px;"
+            )
 
         self._status_bar = self.statusBar()
         self._status_bar.showMessage("フォルダを選択してください")
@@ -298,6 +309,9 @@ class MainWindow(QMainWindow):
                 QApplication.focusWidget(), QComboBox
             ):
                 self._relay_step(-1 if key == Qt.Key.Key_Left else 1)
+                return True
+            if key == Qt.Key.Key_Delete and QApplication.activeModalWidget() is None:
+                self._relay_delete_current()
                 return True
         return super().eventFilter(obj, event)
 
@@ -568,11 +582,13 @@ class MainWindow(QMainWindow):
     def _on_scan_finished(self, groups: dict[str, list[VideoInfo]]) -> None:
         self._groups = groups
         self._group_tree.set_groups(groups)
+        self._suppress_relay_resync = False
         total = sum(len(v) for v in groups.values())
         logger.info("スキャン完了: %d本 (%s)", total, self._root)
         self._status_bar.showMessage(f"スキャン完了: {total} 本 ({self._root})")
 
     def _on_scan_failed(self, message: str) -> None:
+        self._suppress_relay_resync = False
         logger.error("スキャンに失敗しました: %s", message)
         QMessageBox.critical(self, "スキャンに失敗しました", message)
         self._status_bar.showMessage("スキャンに失敗しました")
@@ -594,6 +610,10 @@ class MainWindow(QMainWindow):
         self._relay_action.setEnabled(not self._is_busy() and self._proxy_model.rowCount() > 0)
 
         if self._relay_active:
+            if self._suppress_relay_resync:
+                # リレー中の削除に伴う再スキャンによる再選択。ユーザーが明示的に
+                # フォルダを切り替えたわけではないので、リレーを作り直さない。
+                return
             # リレー再生中にグループツリーで別フォルダを選んだ場合、
             # そのフォルダの動画でリレーを続ける（先頭から）。
             new_videos = self._relay_videos_from_table()
@@ -744,6 +764,11 @@ class MainWindow(QMainWindow):
     def _on_delete_requested(self) -> None:
         if self._root is None or self._state is None or self._is_busy():
             return
+        if self._relay_active:
+            # リレー（ループ）再生中は中央テーブルが非表示でチェック/選択行を
+            # 対象にできないため、代わりに今再生中の動画を対象にする。
+            self._relay_delete_current()
+            return
         rows = self._target_rows()
         if not rows:
             return
@@ -754,6 +779,48 @@ class MainWindow(QMainWindow):
 
         self._unload_if_playing(videos)
         self._start_maintenance_thread(_run_trash, "ごみ箱へ移動中...", videos, self._state)
+
+    def _relay_delete_current(self) -> None:
+        """リレー（ループ）再生中に、今再生中の動画をごみ箱へ送る。
+
+        削除後は mpv のプレイリストから直接取り除いて次の動画へ進ませる（作り直しに
+        よる一瞬のブラックアウトを避けるため）。バックグラウンドで再スキャンをかけて
+        テーブル・グループツリーの情報を追随させるが、その再スキャンに伴うグループ
+        ツリーの再選択でリレーが先頭から作り直されないよう抑制する
+        （_suppress_relay_resync、_on_group_selected 参照）。
+        """
+        if self._root is None or self._state is None or self._is_busy():
+            return
+        if not self._relay_active or not (0 <= self._relay_index < len(self._relay_videos)):
+            return
+
+        if not dialogs.confirm_trash(self, 1):
+            return
+
+        removed_index = self._relay_index
+        removed_path = self._player.delete_current_playlist_item()
+        if 0 <= removed_index < len(self._relay_videos):
+            del self._relay_videos[removed_index]
+        self._thumbnail_strip.set_videos(self._relay_videos)
+
+        if removed_path is None:
+            return
+
+        applied, warnings = fileops.trash_files([removed_path])
+        for path in applied:
+            self._state.set_excluded(path, False)
+        self._state.save()
+
+        if warnings:
+            logger.warning("削除に失敗しました: %s", "; ".join(warnings))
+            QMessageBox.warning(self, "削除に失敗しました", "\n".join(warnings))
+        else:
+            logger.info("リレー再生中に削除しました: %s", removed_path.name)
+            self._status_bar.showMessage(f"削除しました: {removed_path.name}")
+
+        if self._relay_active:
+            self._suppress_relay_resync = True
+        self._start_scan()
 
     def _on_move_to_folder_action(self) -> None:
         if self._root is None or self._state is None or self._is_busy():
