@@ -603,10 +603,17 @@ class MainWindow(QMainWindow):
             manual = self._state.manual_order.get(name)
             videos = concat.order_videos(videos, SortMode.MANUAL, manual)
         self._table_model.set_videos(videos, self._state)
-        if self._proxy_model.rowCount() > 0:
-            first_index = self._proxy_model.index(0, 0)
-            self._select_row(first_index)
-        self._table_view.setFocus()
+        if not self._relay_active:
+            # リレー再生中は、通常再生（テーブルの行選択に連動する player.load()）が
+            # リレー専用のプレイリスト再生と衝突しないよう、選択・フォーカスの変更は
+            # 行わない（5 章「動画の切り替えはリレー専用のロジックで行い、中央テーブル
+            # の選択状態は変更しない」）。バックグラウンド再スキャン後の再選択で
+            # ここが unconditional に player.load() を呼んでいたため、稼働中の mpv
+            # プレイリストと衝突してクラッシュ・無反応の原因になっていた。
+            if self._proxy_model.rowCount() > 0:
+                first_index = self._proxy_model.index(0, 0)
+                self._select_row(first_index)
+            self._table_view.setFocus()
         self._relay_action.setEnabled(not self._is_busy() and self._proxy_model.rowCount() > 0)
 
         if self._relay_active:
@@ -785,20 +792,15 @@ class MainWindow(QMainWindow):
 
         削除された動画を詰めて、再生位置がそのまま「次の動画」になるようにする
         （末尾を削除した場合はループ設定に応じて先頭へ戻る、またはリレーを終了する）。
-        mpv の `playlist-remove` で現在項目だけを取り除く方式は、内部的に一旦停止 →
-        次項目再生という遷移になり playlist-pos が一時的に不定値を経由することがあり、
-        通常の EOF 検知（`_on_playlist_pos_changed` の -1 判定）を誤って発火させて
-        リレーがそのまま終了してしまう不具合があったため採用していない。
 
-        「次の動画」から始まるリストを作って `_begin_relay_sequence`（= load_playlist
-        による再構築）に渡す方式にしている。`load_playlist()` 直後に
-        `jump_to_playlist_index()` で目的の位置まで送る方式も試したが、再構築直後は
-        mpv 側のプレイリストがまだ完全に組み上がっていないタイミングがあるらしく、
-        意図しない位置（末尾など）から再生が始まり、かつその後キー操作を受け付けなく
-        なる不具合があったため採用していない。ループ ON の場合は「次の動画」以降 →
-        先頭からの順で並べ替えたリスト（無限ループなので位相をずらすだけで再生順は
-        変わらない）、OFF の場合は「次の動画」以降だけのリスト（すでに見た分は
-        再度読み込まない）を渡す。
+        削除のたびに `_begin_relay_sequence`（= load_playlist による stop からの
+        再構築）を呼び直す方式は、稼働中の MPV インスタンスに短時間で繰り返し
+        発行すると python-mpv の ctypes 層でまれにネイティブのアクセス違反
+        （アプリごと落ちる／無反応になる）を実機検証で確認したため採用していない
+        （`_begin_relay_sequence` 自体は「フォルダ切り替え」等、頻度が低い操作
+        向けとして残している）。代わりに `player.delete_current_playlist_item()`
+        （mpv の `playlist-remove current` を使う単発の軽い命令）で、リストを
+        作り直さずに今の項目だけを取り除く。詳細はそちらの docstring 参照。
 
         ごみ箱送り自体は他の削除操作と同じくワーカースレッドで行う（`_run_trash`／
         `_start_maintenance_thread`）。send2trash はシェル操作でメインスレッドの
@@ -814,33 +816,48 @@ class MainWindow(QMainWindow):
         if not self._relay_active or not (0 <= self._relay_index < len(self._relay_videos)):
             return
 
-        target = self._relay_videos[self._relay_index]
-
         if not dialogs.confirm_trash(self, 1):
             return
 
         removed_index = self._relay_index
-        remaining = [v for i, v in enumerate(self._relay_videos) if i != removed_index]
-        loop = self._relay_loop_checkbox.isChecked()
-        was_last = removed_index == len(self._relay_videos) - 1
+        if not (0 <= removed_index < len(self._relay_videos)):
+            return
+        target = self._relay_videos[removed_index]
 
-        if not remaining or (was_last and not loop):
-            # これ以上再生する動画がない（末尾かつループ OFF、または残り 0 本）。
+        removed_path, new_index = self._player.delete_current_playlist_item(target.path)
+        if removed_path is None:
+            # 確認ダイアログの間に再生位置が変わった等で、今再生中の動画と
+            # 対象がずれてしまった。誤ったファイルを消さないよう何もしない
+            # （もう一度 Delete を押してもらえばよい）。
+            logger.warning(
+                "削除対象が再生中の動画と一致しなくなったため中止しました: %s",
+                target.path.name,
+            )
+            return
+
+        del self._relay_videos[removed_index]
+
+        if not self._relay_videos:
             self._stop_relay()
         else:
-            # 削除した項目を詰めるので、同じインデックスがそのまま「次の動画」になる
-            # （末尾を削除しループ ON の場合のみ先頭へ戻る）。「次の動画」が先頭に来る
-            # リストを作って渡す（load_playlist 直後の jump は不具合があったため
-            # 使わない。このメソッドの docstring 参照）。
-            next_index = 0 if was_last else removed_index
-            if loop:
-                playlist_to_load = remaining[next_index:] + remaining[:next_index]
-            else:
-                playlist_to_load = remaining[next_index:]
-            self._begin_relay_sequence(playlist_to_load)
+            self._thumbnail_strip.set_videos(self._relay_videos)
+            if new_index is not None:
+                # 末尾以外を削除した場合、mpv 側は playlist-pos の値を変えずに
+                # 繰り上がった項目をそのまま再生するため、通常の
+                # _on_playlist_index_changed（playlist-pos の変化を監視）が発火
+                # しない。ここで自前で状態を合わせる。
+                self._relay_index = new_index
+                self._thumbnail_strip.set_current_index(new_index)
+                info = self._relay_videos[new_index]
+                self._status_bar.showMessage(
+                    f"リレー再生中 ({new_index + 1}/{len(self._relay_videos)}): "
+                    f"{info.path.name}"
+                )
+            # new_index が None のときは末尾の項目を削除した場合で、mpv 側の
+            # playlist-pos が実際に変化する（ループ ON なら先頭へ折り返し、OFF
+            # ならそのまま終了）ため、既存の _on_playlist_index_changed /
+            # _on_playlist_finished がそのまま処理する。
 
-        # load_playlist()/stop_playlist() のいずれの経路でも、ここに来た時点で
-        # 削除対象のファイルは mpv から解放済み（ハンドルが外れている）。
         logger.info("リレー再生中に削除します: %s", target.path.name)
         if self._relay_active:
             self._suppress_relay_resync = True

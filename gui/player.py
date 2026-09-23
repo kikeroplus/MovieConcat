@@ -199,6 +199,53 @@ class PlayerWidget(QWidget):
             return
         self._mpv.playlist_play_index(index)
 
+    def delete_current_playlist_item(
+        self, expected_path: Path
+    ) -> tuple[Optional[Path], Optional[int]]:
+        """リレー再生中、今再生中の項目をプレイリストから取り除く。
+
+        mpv の `playlist-remove current` を使う。`load_playlist()`（stop して
+        プレイリスト全体を作り直す方式）を稼働中の MPV インスタンスに対して短時間に
+        繰り返し発行すると、python-mpv の ctypes 層でまれにネイティブのアクセス
+        違反（クラッシュ）を起こすことを実機検証で確認したため、削除のたびに
+        `load_playlist()` を呼び直す方式は採用していない（`_begin_relay_sequence`
+        による作り直し自体は「フォルダ切り替え」等、頻度が低い操作向けとして残す）。
+        `playlist-remove` は単発の軽い命令のため、繰り返し発行してもクラッシュしない
+        ことを確認済み。
+
+        ただし `playlist-remove current` で末尾以外の項目を消した場合、削除後に
+        繰り上がった項目がそのまま同じ playlist-pos 番号で再生を続けるため、
+        mpv 側の playlist-pos の値自体は変化しない（＝ observe_property の
+        コールバックが発火せず、`_on_playlist_pos_changed` 経由の自動更新が
+        効かない）。そのため呼び出し側の状態は、このメソッドの戻り値を使って
+        自前で更新すること。末尾の項目を削除した場合は playlist-pos が実際に
+        変化する（ループ ON なら 0 へ折り返し、OFF なら -1 になる）ため、
+        既存の observe_property の経路がそのまま処理する。
+
+        Returns:
+            (削除した項目のパス, 削除後にそこへ繰り上がった項目の新しいインデックス)。
+            末尾の項目を削除した場合、2 番目の要素は None
+            （呼び出し側は何もせず既存の playlist-pos 監視に任せてよい）。
+            今再生中の項目が `expected_path` と一致しない場合（呼び出し側の状態と
+            食い違っている場合）は `(None, None)`。
+        """
+        if not self._playlist_running or self._current_path != expected_path:
+            return None, None
+        try:
+            removed_index = self._playlist_paths.index(expected_path)
+        except ValueError:
+            return None, None
+
+        was_last = removed_index == len(self._playlist_paths) - 1
+        self._mpv.command("playlist-remove", "current")
+        del self._playlist_paths[removed_index]
+
+        if was_last:
+            return expected_path, None
+
+        self._current_path = self._playlist_paths[removed_index]
+        return expected_path, removed_index
+
     def stop_playlist(self) -> None:
         """リレー再生の終了。単発再生用のループ設定に戻す。"""
         self._playlist_running = False
