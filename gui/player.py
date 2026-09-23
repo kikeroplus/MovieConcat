@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.appdir import get_app_dir
+from core.applog import logger
 
 # libmpv-2.dll はアプリフォルダ直下に配置する前提。`import mpv` の前に PATH へ追加する。
 _APP_DIR = get_app_dir()
@@ -197,7 +198,13 @@ class PlayerWidget(QWidget):
     def jump_to_playlist_index(self, index: int) -> None:
         if not self._playlist_running or not (0 <= index < len(self._playlist_paths)):
             return
-        self._mpv.playlist_play_index(index)
+        try:
+            self._mpv.playlist_play_index(index)
+        except Exception as e:
+            # 操作が短時間に重なる等でタイミングが悪いと mpv 側でコマンドが失敗する
+            # ことがある（SystemError: Error running mpv command）。無視して構わない
+            # 操作（スキップ）なのでログに残すだけにする。
+            logger.warning("playlist-play-index に失敗しました: %s", e)
 
     def delete_current_playlist_item(
         self, expected_path: Path
@@ -237,7 +244,16 @@ class PlayerWidget(QWidget):
             return None, None
 
         was_last = removed_index == len(self._playlist_paths) - 1
-        self._mpv.command("playlist-remove", "current")
+        try:
+            self._mpv.command("playlist-remove", "current")
+        except Exception as e:
+            # 操作が短時間に重なる等でタイミングが悪いと、mpv 側で「今の項目」が
+            # 一致せずコマンドが失敗する（SystemError: Error running mpv command,
+            # -12）ことがある。呼び出し側の状態は変えず、失敗を伝えるだけにする
+            # （プレイリストは変更されていないので、削除対象のファイルは
+            # ごみ箱へ送らない）。
+            logger.warning("playlist-remove に失敗しました: %s", e)
+            return None, None
         del self._playlist_paths[removed_index]
 
         if was_last:
