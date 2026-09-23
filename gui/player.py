@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -87,7 +86,6 @@ class PlayerWidget(QWidget):
         self._playlist_paths: list[Path] = []
         self._playlist_running = False  # load_playlist() 中かどうか
         self._playlist_started = False  # 実際に再生が始まった（pos >= 0 を一度でも観測した）か
-        self._playlist_index = -1  # 直近に観測した playlist-pos
 
         self._mpv = mpv.MPV(
             wid=str(int(self._video_frame.winId())),
@@ -180,7 +178,6 @@ class PlayerWidget(QWidget):
         self._playlist_paths = list(paths)
         self._playlist_running = True
         self._playlist_started = False
-        self._playlist_index = 0 if paths else -1
         self._duration = 0.0
         self._current_path = paths[0] if paths else None
 
@@ -201,38 +198,6 @@ class PlayerWidget(QWidget):
         if not self._playlist_running or not (0 <= index < len(self._playlist_paths)):
             return
         self._mpv.playlist_play_index(index)
-
-    def delete_current_playlist_item(self) -> Optional[Path]:
-        """リレー再生中、今再生中の項目をプレイリストから取り除く。
-
-        作り直し（load_playlist）ではなく mpv の `playlist-remove current` を使うことで、
-        次の項目へ mpv 内部でそのまま進ませ、作り直し特有の一瞬のブラックアウトを避ける
-        （末尾の項目だった場合はそのまま停止し、通常の EOF 検知と同様に
-        playlist_finished が発火する）。
-
-        戻り値は取り除いた項目のパス（再生中でなければ None）。呼び出し元はこの戻り値を
-        ごみ箱へ送ってよい。ただし mpv がファイルハンドルを実際に手放すまでは
-        `PermissionError` になり得るため、手放すまで（最大 2 秒）ブロックして待つ。
-        """
-        if not self._playlist_running or self._current_path is None:
-            return None
-        removed_path = self._current_path
-        removed_index = self._playlist_index
-        self._mpv.command("playlist-remove", "current")
-        if 0 <= removed_index < len(self._playlist_paths):
-            del self._playlist_paths[removed_index]
-
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            try:
-                current = self._mpv.path
-            except Exception:
-                current = None
-            if current is None or Path(current) != removed_path:
-                break
-            time.sleep(0.02)
-
-        return removed_path
 
     def stop_playlist(self) -> None:
         """リレー再生の終了。単発再生用のループ設定に戻す。"""
@@ -289,7 +254,6 @@ class PlayerWidget(QWidget):
 
     def _on_playlist_pos_changed(self, value: object) -> None:
         index = value if isinstance(value, int) else -1
-        self._playlist_index = index
         if index >= 0:
             self._playlist_started = True
             if 0 <= index < len(self._playlist_paths):

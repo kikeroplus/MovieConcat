@@ -783,30 +783,50 @@ class MainWindow(QMainWindow):
     def _relay_delete_current(self) -> None:
         """リレー（ループ）再生中に、今再生中の動画をごみ箱へ送る。
 
-        削除後は mpv のプレイリストから直接取り除いて次の動画へ進ませる（作り直しに
-        よる一瞬のブラックアウトを避けるため）。バックグラウンドで再スキャンをかけて
-        テーブル・グループツリーの情報を追随させるが、その再スキャンに伴うグループ
-        ツリーの再選択でリレーが先頭から作り直されないよう抑制する
-        （_suppress_relay_resync、_on_group_selected 参照）。
+        削除された動画を詰めて、再生位置がそのまま「次の動画」になるようにする
+        （末尾を削除した場合はループ設定に応じて先頭へ戻る、またはリレーを終了する）。
+        mpv の `playlist-remove` で現在項目だけを取り除く方式は、内部的に一旦停止 →
+        次項目再生という遷移になり playlist-pos が一時的に不定値を経由することがあり、
+        通常の EOF 検知（`_on_playlist_pos_changed` の -1 判定）を誤って発火させて
+        リレーがそのまま終了してしまう不具合があったため採用していない。代わりに
+        既存の `_begin_relay_sequence`（load_playlist の「stop → wait for core-idle →
+        再構築」という、ファイルハンドルの解放待ちも含めて実績のある処理）で
+        リストを作り直し、必要なら `jump_to_playlist_index` で新しい「次の動画」の
+        位置まで進める。
+
+        バックグラウンドで再スキャンをかけてテーブル・グループツリーの情報を追随させる
+        が、その再スキャンに伴うグループツリーの再選択でリレーが先頭から作り直されない
+        よう抑制する（_suppress_relay_resync、_on_group_selected 参照）。
         """
         if self._root is None or self._state is None or self._is_busy():
             return
         if not self._relay_active or not (0 <= self._relay_index < len(self._relay_videos)):
             return
 
+        target = self._relay_videos[self._relay_index]
+
         if not dialogs.confirm_trash(self, 1):
             return
 
         removed_index = self._relay_index
-        removed_path = self._player.delete_current_playlist_item()
-        if 0 <= removed_index < len(self._relay_videos):
-            del self._relay_videos[removed_index]
-        self._thumbnail_strip.set_videos(self._relay_videos)
+        remaining = [v for i, v in enumerate(self._relay_videos) if i != removed_index]
+        loop = self._relay_loop_checkbox.isChecked()
+        was_last = removed_index == len(self._relay_videos) - 1
 
-        if removed_path is None:
-            return
+        if not remaining or (was_last and not loop):
+            # これ以上再生する動画がない（末尾かつループ OFF、または残り 0 本）。
+            self._stop_relay()
+        else:
+            # 削除した項目を詰めるので、同じインデックスがそのまま「次の動画」になる
+            # （末尾を削除しループ ON の場合のみ先頭へ戻る）。
+            next_index = 0 if was_last else removed_index
+            self._begin_relay_sequence(remaining)
+            if next_index != 0:
+                self._player.jump_to_playlist_index(next_index)
 
-        applied, warnings = fileops.trash_files([removed_path])
+        # load_playlist()/stop_playlist() のいずれの経路でも、ここに来た時点で
+        # 削除対象のファイルは mpv から解放済み（ハンドルが外れている）。
+        applied, warnings = fileops.trash_files([target.path])
         for path in applied:
             self._state.set_excluded(path, False)
         self._state.save()
@@ -815,8 +835,8 @@ class MainWindow(QMainWindow):
             logger.warning("削除に失敗しました: %s", "; ".join(warnings))
             QMessageBox.warning(self, "削除に失敗しました", "\n".join(warnings))
         else:
-            logger.info("リレー再生中に削除しました: %s", removed_path.name)
-            self._status_bar.showMessage(f"削除しました: {removed_path.name}")
+            logger.info("リレー再生中に削除しました: %s", target.path.name)
+            self._status_bar.showMessage(f"削除しました: {target.path.name}")
 
         if self._relay_active:
             self._suppress_relay_resync = True
