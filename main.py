@@ -13,9 +13,24 @@ from core.applog import logger, setup_file_logging
 APP_DIR = get_app_dir()
 
 
+def _is_mpv_command_timing_error(exc_type, exc_value) -> bool:
+    """mpv コマンドがタイミング良く失敗しただけの例外か判定する。
+
+    シークバーのドラッグやホイールでのシーク・スキップを勢いよく連続して行うと、
+    ちょうど動画の切り替わり（リレー再生でリストの末尾に達した瞬間など）と重なって
+    python-mpv 側のコマンドがまれに失敗する（`SystemError: Error running mpv
+    command, -12, ...`）。実害のない一時的なタイミングの問題であり、操作を続ければ
+    特に問題なく動作するため、ユーザーには「予期しないエラー」ダイアログで毎回
+    知らせず、ログにだけ残す。
+    """
+    return exc_type is SystemError and bool(exc_value.args) and exc_value.args[0] == "Error running mpv command"
+
+
 def _install_exception_hook() -> None:
     def handle_exception(exc_type, exc_value, exc_tb) -> None:
         logger.error("予期しない例外", exc_info=(exc_type, exc_value, exc_tb))
+        if _is_mpv_command_timing_error(exc_type, exc_value):
+            return
         QMessageBox.critical(
             None, "予期しないエラー", f"{exc_type.__name__}: {exc_value}"
         )
